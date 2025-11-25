@@ -35,47 +35,72 @@ def parse_address(address_str: str) -> Dict[str, str]:
     # Remove country code if present
     address = address_str.replace(" US", "").strip()
     
-    # Try to extract state first (2-letter abbreviation, must be valid US state)
-    # Look for state - zip code typically comes after state
-    state_match = None
-    state_pos = -1
-    for state in valid_states:
-        # Match state as whole word, typically before zip or at end
-        pattern = r'\b' + re.escape(state) + r'\b'
-        match = re.search(pattern, address)
-        if match:
-            # Make sure it's not part of a road designation (like FM, US, SR, etc.)
-            pos = match.start()
-            if pos > 0:
-                prev_char = address[pos - 1]
-                # If preceded by a letter, it might be part of a road name
-                if prev_char.isalpha() and prev_char != ' ':
-                    continue
-            state_match = match
-            state_pos = match.end()
-            break
-    
-    # Extract postal code (5 digits, optionally with -4 digits)
-    # If we found a state, zip code is typically right after it
-    if state_match:
-        parts['state'] = state_match.group(0)
-        # Look for zip code after the state
-        address_after_state = address[state_pos:].strip()
-        zip_match = re.search(r'\b(\d{5}(?:-\d{4})?)\b', address_after_state)
-        if zip_match:
-            parts['postcode'] = zip_match.group(1)
-        # Remove state and zip code from address
-        address = address[:state_match.start()].strip()
+    # Extract postal code first (5 digits, optionally with -4 digits)
+    # State is typically right before the zip code
+    zip_match = re.search(r'\b(\d{5}(?:-\d{4})?)\b', address)
+    zip_pos = -1
+    if zip_match:
+        parts['postcode'] = zip_match.group(1)
+        zip_pos = zip_match.start()
+        # Look for state immediately before the zip code
+        address_before_zip = address[:zip_pos].strip()
+        
+        # Try to find state right before zip code
+        state_match = None
+        state_pos = -1
+        # Look for valid states in the text before zip, but prefer the one closest to zip
+        best_match = None
+        best_pos = -1
+        
+        for state in valid_states:
+            # Match state as whole word before zip
+            pattern = r'\b' + re.escape(state) + r'\b'
+            matches = list(re.finditer(pattern, address_before_zip))
+            for match in matches:
+                # Make sure it's not part of a road designation (like FM, US, SR, etc.)
+                pos = match.start()
+                if pos > 0:
+                    prev_char = address_before_zip[pos - 1]
+                    # If preceded by a letter, it might be part of a road name
+                    if prev_char.isalpha() and prev_char != ' ':
+                        continue
+                # Prefer states that are closer to the zip code (right before it)
+                if best_match is None or match.end() > best_pos:
+                    best_match = match
+                    best_pos = match.end()
+        
+        if best_match:
+            state_match = best_match
+            state_pos = best_match.end()
+            parts['state'] = state_match.group(0)
+            # Remove state and zip code from address
+            address = address[:state_match.start()].strip()
+        else:
+            # No state found before zip, remove zip from address for further processing
+            address = address_before_zip
     else:
-        # No state found, try to find zip code at the end
-        zip_match = re.search(r'\b(\d{5}(?:-\d{4})?)\b', address)
-        if zip_match:
-            # Check if this looks like it's at the end (likely zip code)
-            zip_pos = zip_match.end()
-            remaining = address[zip_pos:].strip()
-            if not remaining or len(remaining) < 3:  # Likely the zip code
-                parts['postcode'] = zip_match.group(1)
-                address = address[:zip_match.start()].strip()
+        # No zip code found, try to find state at the end
+        state_match = None
+        state_pos = -1
+        for state in valid_states:
+            # Match state as whole word, typically at end
+            pattern = r'\b' + re.escape(state) + r'\b'
+            match = re.search(pattern, address)
+            if match:
+                # Make sure it's not part of a road designation
+                pos = match.start()
+                if pos > 0:
+                    prev_char = address[pos - 1]
+                    if prev_char.isalpha() and prev_char != ' ':
+                        continue
+                # Prefer state at the end
+                if state_match is None or match.end() > state_pos:
+                    state_match = match
+                    state_pos = match.end()
+        
+        if state_match:
+            parts['state'] = state_match.group(0)
+            address = address[:state_match.start()].strip()
     
     # Split remaining address
     address_parts = address.split()
@@ -129,9 +154,10 @@ def parse_address(address_str: str) -> Dict[str, str]:
                     'N.E.', 'N.W.', 'S.E.', 'S.W.'}
     
     # Work backwards to find city (skip street suffixes and directionals)
-    # City can be multiple words (e.g., "Los Angeles", "New York")
+    # City can be multiple words (e.g., "Los Angeles", "New York", "North Charleston")
     # Collect capitalized words at the end that aren't suffixes or suite parts
     # Single letters after street suffixes are likely part of street name (e.g., "Avenue B")
+    # Note: Directionals at the start of city names (e.g., "North" in "North Charleston") should be included
     city_parts = []
     city_start_index = -1
     found_street_suffix = False
@@ -145,28 +171,100 @@ def parse_address(address_str: str) -> Dict[str, str]:
         if i == housenumber_index:
             # If we hit the house number, we've passed the city
             break
-        # If it's a capitalized word (starts with capital), check if it's part of city
-        if part and part[0].isupper() and not part.isdigit():
+        # Check if it could be part of city name
+        # City names can start with capital or be all lowercase (data inconsistencies)
+        if part and not part.isdigit():
             part_upper = part.upper().rstrip('.')  # Remove trailing period
-            # If it's a street suffix or directional, we've reached the end of city
-            if part_upper in street_suffixes or part_upper in directionals:
+            
+            # If it's a street suffix, we've reached the end of city
+            if part_upper in street_suffixes:
                 found_street_suffix = True
                 break
+            
+            # Check if it's a directional
+            if part_upper in directionals:
+                # Check if there's a city name after this directional (when going backwards)
+                # If "NE" appears between street and city, it's likely a street directional
+                if city_parts:
+                    # We already have city parts. Check if this directional is followed by more city-like words
+                    # Look ahead (backwards) to see what comes before
+                    if i > 0:
+                        prev_idx = i - 1
+                        while prev_idx >= 0 and (prev_idx in suite_indices or prev_idx == housenumber_index):
+                            prev_idx -= 1
+                        if prev_idx >= 0:
+                            prev_part = address_parts[prev_idx]
+                            prev_part_upper = prev_part.upper().rstrip('.')
+                            # If previous word is capitalized and not a street suffix, this directional
+                            # is likely between street and city (e.g., "Meadowview NE" before "WINTER HAVEN")
+                            # So "NE" is part of street, not city
+                            if prev_part and prev_part[0].isupper() and prev_part_upper not in street_suffixes:
+                                # This directional is likely part of street name, not city
+                                break
+                    # Otherwise, include directional as part of city (e.g., "North" in "North Charleston")
+                    city_parts.insert(0, part)
+                    city_start_index = i
+                    continue
+                else:
+                    # No city parts yet - check if this directional starts a city name
+                    # Look ahead (backwards in iteration, i.e., i-1) for the next word
+                    if i > 0:
+                        next_idx = i - 1
+                        # Skip suite parts
+                        while next_idx >= 0 and (next_idx in suite_indices or next_idx == housenumber_index):
+                            next_idx -= 1
+                        if next_idx >= 0:
+                            next_part = address_parts[next_idx]
+                            # If next part is a word (not digit, not suite), this could be "North [City]"
+                            if next_part and not next_part.isdigit():
+                                # Include both the directional and the next word as city
+                                city_parts.insert(0, next_part)  # City name first
+                                city_parts.insert(0, part)       # Then directional
+                                city_start_index = i
+                                # Skip the next part in future iterations
+                                continue
+                    # If no city parts found, this directional is likely part of street name
+                    found_street_suffix = True
+                    break
+            
             # If we just passed a street suffix and this is a single letter, it's likely part of street name
             # (e.g., "Avenue B" - the "B" is part of the street, not city)
             if found_street_suffix and len(part_upper) == 1:
                 # This single letter is part of street name, not city
                 break
+            
             # Reset the flag if we find a substantial word
             if len(part_upper) > 1:
                 found_street_suffix = False
-            # This could be part of the city name
-            city_parts.insert(0, part)  # Insert at beginning to maintain order
-            city_start_index = i
-        else:
-            # If we hit a non-capitalized word (that's not a suite), we've passed the city
-            if i not in suite_indices and part and not part[0].isdigit():
-                break
+            
+            # Accept the word if:
+            # 1. It starts with a capital (proper noun)
+            # 2. OR it's all lowercase and we're in city-collection mode (handles data inconsistencies)
+            # 3. OR it's lowercase but followed by a directional (e.g., "charleston" before "North")
+            if part[0].isupper() or (city_parts and part[0].islower()):
+                # This could be part of the city name
+                city_parts.insert(0, part)  # Insert at beginning to maintain order
+                city_start_index = i
+            elif part[0].islower() and not city_parts:
+                # Lowercase word and no city parts yet - check if next word (i-1) is a directional
+                # If so, this might be part of a city name like "North charleston"
+                if i > 0:
+                    next_idx = i - 1
+                    # Skip suite parts and house number
+                    while next_idx >= 0 and (next_idx in suite_indices or next_idx == housenumber_index):
+                        next_idx -= 1
+                    if next_idx >= 0:
+                        next_part_upper = address_parts[next_idx].upper().rstrip('.')
+                        if next_part_upper in directionals:
+                            # This lowercase word is likely the city name, and next is directional
+                            # We'll handle the directional in the next iteration, so include this now
+                            city_parts.insert(0, part)
+                            city_start_index = i
+                        else:
+                            # Not part of city name, likely part of street
+                            break
+                else:
+                    break
     
     # Filter out single letters from city if they appear right after we've seen street parts
     # Re-check: if the first city part is a single letter and we have street parts before it,
@@ -232,6 +330,7 @@ def map_category_to_osm(category: str) -> list:
         'gas_station': 'fuel',
         'food_truck_cart': 'fast_food',
         'food_stores_convenience_stores_and_specialty_markets': 'convenience',
+        'beauty_and_barber_shops': 'hairdresser',
     }
     
     # Special cases that need additional tags
@@ -241,15 +340,16 @@ def map_category_to_osm(category: str) -> list:
     
     tags = []
     
-    # If category contains shop-related terms, use shop tag
-    if 'shop' in category or category in ['retail', 'confectionery', 'food', 'convenience']:
-        tags.append(f'shop={category}')
-    elif category in category_mapping:
+    # First check if category is in our mapping dictionary
+    if category in category_mapping:
         mapped = category_mapping[category]
-        if mapped in ['shop', 'supermarket', 'fuel', 'convenience']:
+        if mapped in ['shop', 'supermarket', 'fuel', 'convenience', 'hairdresser']:
             tags.append(f'shop={mapped}')
         else:
             tags.append(f'amenity={mapped}')
+    # If category contains shop-related terms, use shop tag
+    elif 'shop' in category or category in ['retail', 'confectionery', 'food', 'convenience', 'hairdresser']:
+        tags.append(f'shop={category}')
     else:
         # Default to shop if unknown
         tags.append(f'shop={category}')
@@ -322,6 +422,28 @@ def infer_cuisine_from_name(name: str) -> List[str]:
     return cuisine_tags
 
 
+def infer_hairdresser_type_from_name(name: str) -> List[str]:
+    """
+    Infer hairdresser type tags from business name.
+    Returns a list of additional tags (e.g., ['hairdresser=barber']).
+    """
+    if not name:
+        return []
+    
+    name_lower = name.lower()
+    tags = []
+    
+    # Check for barber-related keywords
+    barber_keywords = ['barber', 'barbershop', "barber's", "barber's shop"]
+    
+    for keyword in barber_keywords:
+        if keyword in name_lower:
+            tags.append('hairdresser=barber')
+            break  # Only need to add once
+    
+    return tags
+
+
 def convert_btcmap_to_osm(data: Dict) -> str:
     """
     Convert BTCMap data to OSM tag format.
@@ -378,6 +500,11 @@ def convert_btcmap_to_osm(data: Dict) -> str:
     if 'category' in data:
         osm_tags = map_category_to_osm(data['category'])
         output_lines.extend(osm_tags)
+        
+        # If it's a hairdresser shop, check name for barber keywords
+        if 'shop=hairdresser' in osm_tags and 'name' in data:
+            hairdresser_tags = infer_hairdresser_type_from_name(data['name'])
+            output_lines.extend(hairdresser_tags)
     
     # Add phone if available (not in example but might be in some data)
     if 'phone' in data.get('extra_fields', {}):
