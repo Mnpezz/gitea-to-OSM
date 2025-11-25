@@ -131,8 +131,10 @@ def parse_address(address_str: str) -> Dict[str, str]:
     # Work backwards to find city (skip street suffixes and directionals)
     # City can be multiple words (e.g., "Los Angeles", "New York")
     # Collect capitalized words at the end that aren't suffixes or suite parts
+    # Single letters after street suffixes are likely part of street name (e.g., "Avenue B")
     city_parts = []
     city_start_index = -1
+    found_street_suffix = False
     
     for i in range(len(address_parts) - 1, -1, -1):
         part = address_parts[i]
@@ -148,7 +150,16 @@ def parse_address(address_str: str) -> Dict[str, str]:
             part_upper = part.upper().rstrip('.')  # Remove trailing period
             # If it's a street suffix or directional, we've reached the end of city
             if part_upper in street_suffixes or part_upper in directionals:
+                found_street_suffix = True
                 break
+            # If we just passed a street suffix and this is a single letter, it's likely part of street name
+            # (e.g., "Avenue B" - the "B" is part of the street, not city)
+            if found_street_suffix and len(part_upper) == 1:
+                # This single letter is part of street name, not city
+                break
+            # Reset the flag if we find a substantial word
+            if len(part_upper) > 1:
+                found_street_suffix = False
             # This could be part of the city name
             city_parts.insert(0, part)  # Insert at beginning to maintain order
             city_start_index = i
@@ -156,6 +167,22 @@ def parse_address(address_str: str) -> Dict[str, str]:
             # If we hit a non-capitalized word (that's not a suite), we've passed the city
             if i not in suite_indices and part and not part[0].isdigit():
                 break
+    
+    # Filter out single letters from city if they appear right after we've seen street parts
+    # Re-check: if the first city part is a single letter and we have street parts before it,
+    # it's likely part of the street name
+    if city_parts and len(city_parts[0]) == 1 and city_start_index > 0:
+        # Check if there's a street suffix right before this single letter
+        prev_idx = city_start_index - 1
+        if prev_idx >= 0 and prev_idx < len(address_parts):
+            prev_part = address_parts[prev_idx].upper().rstrip('.')
+            if prev_part in street_suffixes:
+                # This single letter is part of street name, remove it from city
+                city_parts.pop(0)
+                if city_parts:
+                    city_start_index += 1  # Adjust index
+                else:
+                    city_start_index = -1
     
     if city_parts:
         city = ' '.join(city_parts)
