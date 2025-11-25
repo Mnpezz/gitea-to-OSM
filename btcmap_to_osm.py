@@ -84,18 +84,19 @@ def parse_address(address_str: str) -> Dict[str, str]:
     
     # Find suite/unit indicators (STE, SUITE, UNIT, #, etc.)
     suite_keywords = ['STE', 'SUITE', 'UNIT', '#', 'APT', 'APARTMENT', 'BLDG', 'BUILDING']
-    suite_index = -1
+    suite_indices = set()  # Track all indices that are part of suite (indicator + value)
     suite_value = None
     
     for i, part in enumerate(address_parts):
         part_upper = part.upper()
         if part_upper in suite_keywords:
             if i + 1 < len(address_parts):
-                suite_index = i
+                suite_indices.add(i)  # Suite indicator
+                suite_indices.add(i + 1)  # Suite value
                 suite_value = address_parts[i + 1]
                 break
         elif part.startswith('#') and len(part) > 1:
-            suite_index = i
+            suite_indices.add(i)  # The "#3" token itself
             suite_value = part[1:]  # Remove the #
             break
     
@@ -110,25 +111,55 @@ def parse_address(address_str: str) -> Dict[str, str]:
     
     # Determine city (usually the last capitalized word before state)
     # City is typically a proper noun, so look for capitalized words
+    # But exclude street suffixes, road types, and directional prefixes
     city = None
     city_index = -1
     
-    # Work backwards to find city
+    # Common street suffixes and road types to exclude
+    street_suffixes = {
+        'ST', 'STREET', 'AVE', 'AVENUE', 'RD', 'ROAD', 'BLVD', 'BOULEVARD',
+        'DR', 'DRIVE', 'LN', 'LANE', 'CT', 'COURT', 'PL', 'PLACE', 'WAY',
+        'CIR', 'CIRCLE', 'PKWY', 'PARKWAY', 'TRL', 'TRAIL', 'TER', 'TERRACE',
+        'FM', 'US', 'SR', 'CR', 'HWY', 'HIGHWAY', 'ROUTE', 'RT'
+    }
+    
+    # Directional prefixes to exclude (N, S, E, W, North, South, etc.)
+    directionals = {'N', 'S', 'E', 'W', 'N.', 'S.', 'E.', 'W.', 
+                    'NORTH', 'SOUTH', 'EAST', 'WEST', 'NE', 'NW', 'SE', 'SW',
+                    'N.E.', 'N.W.', 'S.E.', 'S.W.'}
+    
+    # Work backwards to find city (skip street suffixes and directionals)
+    # City can be multiple words (e.g., "Los Angeles", "New York")
+    # Collect capitalized words at the end that aren't suffixes or suite parts
+    city_parts = []
+    city_start_index = -1
+    
     for i in range(len(address_parts) - 1, -1, -1):
         part = address_parts[i]
         # Skip if it's a suite indicator or number
-        if i == suite_index or i == suite_index + 1:
-            continue
+        if i in suite_indices:
+            # If we hit a suite, we've passed the city
+            break
         if i == housenumber_index:
-            continue
-        # If it's a capitalized word (starts with capital), likely city
+            # If we hit the house number, we've passed the city
+            break
+        # If it's a capitalized word (starts with capital), check if it's part of city
         if part and part[0].isupper() and not part.isdigit():
-            # But skip if it's a common road type abbreviation
-            road_types = ['FM', 'US', 'SR', 'CR', 'HWY', 'HIGHWAY', 'RD', 'ST', 'AVE', 'BLVD']
-            if part.upper() not in road_types:
-                city = part
-                city_index = i
+            part_upper = part.upper().rstrip('.')  # Remove trailing period
+            # If it's a street suffix or directional, we've reached the end of city
+            if part_upper in street_suffixes or part_upper in directionals:
                 break
+            # This could be part of the city name
+            city_parts.insert(0, part)  # Insert at beginning to maintain order
+            city_start_index = i
+        else:
+            # If we hit a non-capitalized word (that's not a suite), we've passed the city
+            if i not in suite_indices and part and not part[0].isdigit():
+                break
+    
+    if city_parts:
+        city = ' '.join(city_parts)
+        city_index = city_start_index
     
     if city:
         parts['city'] = city
@@ -140,7 +171,7 @@ def parse_address(address_str: str) -> Dict[str, str]:
     
     for i in range(start_idx, end_idx):
         # Skip suite indicator and suite number
-        if i == suite_index or i == suite_index + 1:
+        if i in suite_indices:
             continue
         street_parts.append(address_parts[i])
     
