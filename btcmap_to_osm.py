@@ -37,12 +37,41 @@ def parse_address(address_str: str) -> Dict[str, str]:
     
     # Extract postal code first (5 digits, optionally with -4 digits)
     # State is typically right before the zip code
-    zip_match = re.search(r'\b(\d{5}(?:-\d{4})?)\b', address)
+    # When multiple 5-digit numbers exist, prefer the one after state or at the end
+    all_zip_matches = list(re.finditer(r'\b(\d{5}(?:-\d{4})?)\b', address))
+    zip_match = None
     zip_pos = -1
-    if zip_match:
+    
+    if all_zip_matches:
+        # If multiple zip codes found, prefer the one that comes after a state abbreviation
+        # or the last one (zip codes are typically at the end)
+        best_zip = None
+        best_pos = -1
+        
+        # First, try to find state and see which zip comes after it
+        for state in valid_states:
+            state_pattern = r'\b' + re.escape(state) + r'\b'
+            state_match = re.search(state_pattern, address)
+            if state_match:
+                state_end = state_match.end()
+                # Look for zip codes after this state
+                for zip_candidate in all_zip_matches:
+                    if zip_candidate.start() >= state_end:
+                        # This zip comes after a state - prefer it
+                        best_zip = zip_candidate
+                        best_pos = zip_candidate.start()
+                        break
+                if best_zip:
+                    break
+        
+        # If no zip after state, use the last zip code (zip codes are typically at the end)
+        if not best_zip:
+            best_zip = all_zip_matches[-1]
+            best_pos = best_zip.start()
+        
+        zip_match = best_zip
+        zip_pos = best_pos
         parts['postcode'] = zip_match.group(1)
-        zip_pos = zip_match.start()
-        # Look for state immediately before the zip code
         address_before_zip = address[:zip_pos].strip()
         
         # Try to find state right before zip code
@@ -321,6 +350,7 @@ def map_category_to_osm(category: str) -> list:
         'professional_services': 'office',
         'restaurants': 'restaurant',
         'cafe': 'cafe',
+        'coffee_tea_shop': 'cafe',
         'retail': 'shop',
         'confectionery': 'shop',
         'food': 'shop',
