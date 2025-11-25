@@ -231,6 +231,7 @@ def map_category_to_osm(category: str) -> list:
         'hotel': 'hotel',
         'gas_station': 'fuel',
         'food_truck_cart': 'fast_food',
+        'food_stores_convenience_stores_and_specialty_markets': 'convenience',
     }
     
     # Special cases that need additional tags
@@ -241,11 +242,11 @@ def map_category_to_osm(category: str) -> list:
     tags = []
     
     # If category contains shop-related terms, use shop tag
-    if 'shop' in category or category in ['retail', 'confectionery', 'food']:
+    if 'shop' in category or category in ['retail', 'confectionery', 'food', 'convenience']:
         tags.append(f'shop={category}')
     elif category in category_mapping:
         mapped = category_mapping[category]
-        if mapped in ['shop', 'supermarket', 'fuel']:
+        if mapped in ['shop', 'supermarket', 'fuel', 'convenience']:
             tags.append(f'shop={mapped}')
         else:
             tags.append(f'amenity={mapped}')
