@@ -6,8 +6,16 @@ Converts BTCMap data format to OSM tag format for easy copy-paste
 
 import re
 import json
+import urllib.request
+import urllib.parse
 from datetime import datetime
 from typing import Dict, List
+
+
+OSM_LOOKUP_ENABLED = True  # Set to False to disable online OSM/Nominatim lookups
+
+# IMPORTANT: Per Nominatim usage policy, set this to something that identifies you
+OSM_USER_AGENT = "btcmap-to-osm-converter/1.0 (CHANGE_ME_WITH_CONTACT_INFO)"
 
 
 def parse_address(address_str: str) -> Dict[str, str]:
@@ -141,18 +149,20 @@ def parse_address(address_str: str) -> Dict[str, str]:
     suite_indices = set()  # Track all indices that are part of suite (indicator + value)
     suite_value = None
     
+    # Collect *all* suite occurrences so they don't leak into street/city,
+    # but only use the first one for addr:unit
     for i, part in enumerate(address_parts):
         part_upper = part.upper()
         if part_upper in suite_keywords:
             if i + 1 < len(address_parts):
                 suite_indices.add(i)  # Suite indicator
                 suite_indices.add(i + 1)  # Suite value
-                suite_value = address_parts[i + 1]
-                break
+                if suite_value is None:
+                    suite_value = address_parts[i + 1]
         elif part.startswith('#') and len(part) > 1:
             suite_indices.add(i)  # The "#3" token itself
-            suite_value = part[1:]  # Remove the #
-            break
+            if suite_value is None:
+                suite_value = part[1:]  # Remove the #
     
     # Extract house number (usually first number in address)
     housenumber = None
@@ -341,6 +351,67 @@ def parse_address(address_str: str) -> Dict[str, str]:
     return parts
 
 
+def lookup_address_with_osm(address_str: str) -> Dict[str, str]:
+    """
+    Use OpenStreetMap Nominatim to look up and normalize an address.
+    Returns a dict with keys like housenumber, street, city, state, postcode.
+    """
+    result: Dict[str, str] = {}
+
+    if not OSM_LOOKUP_ENABLED or not address_str:
+        return result
+
+    try:
+        query = urllib.parse.quote_plus(address_str)
+        url = (
+            f"https://nominatim.openstreetmap.org/search"
+            f"?format=jsonv2&addressdetails=1&limit=1&q={query}"
+        )
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": OSM_USER_AGENT,
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        if not data:
+            return result
+
+        addr = data[0].get("address", {})
+
+        # House number
+        if "house_number" in addr:
+            result["housenumber"] = addr["house_number"]
+
+        # Street / road
+        for key in ["road", "pedestrian", "footway", "street", "residential"]:
+            if key in addr:
+                result["street"] = addr[key]
+                break
+
+        # City / town / village
+        for key in ["city", "town", "village", "hamlet", "suburb"]:
+            if key in addr:
+                result["city"] = addr[key]
+                break
+
+        # State
+        if "state" in addr:
+            result["state"] = addr["state"]
+
+        # Postcode
+        if "postcode" in addr:
+            result["postcode"] = addr["postcode"]
+
+    except Exception:
+        # If anything goes wrong with the online lookup, silently fall back to local parsing
+        return {}
+
+    return result
+
+
 def map_category_to_osm(category: str) -> list:
     """
     Map BTCMap category to OSM shop/amenity tags.
@@ -485,7 +556,16 @@ def convert_btcmap_to_osm(data: Dict) -> str:
     
     # Parse address
     if 'address' in data.get('extra_fields', {}):
-        address_parts = parse_address(data['extra_fields']['address'])
+        raw_address = data['extra_fields']['address']
+
+        # First, use local heuristic parser
+        address_parts = parse_address(raw_address)
+
+        # Then, try to refine/override with OSM Nominatim lookup
+        osm_address_parts = lookup_address_with_osm(raw_address)
+        if osm_address_parts:
+            # OSM data overrides local parsing where available
+            address_parts.update(osm_address_parts)
         
         if 'city' in address_parts:
             output_lines.append(f"addr:city={address_parts['city']}")
