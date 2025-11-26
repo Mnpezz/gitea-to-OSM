@@ -172,6 +172,24 @@ def parse_address(address_str: str) -> Dict[str, str]:
             housenumber = part
             housenumber_index = i
             break
+
+    # Special-case: grid-style addresses like "1907 W 1431 KINGSLAND"
+    # Pattern: <housenumber> <direction> <number> <city...>
+    if (
+        housenumber is not None
+        and len(address_parts) >= 4
+        and address_parts[1].upper().rstrip('.') in {'N', 'S', 'E', 'W', 'NE', 'NW', 'SE', 'SW'}
+        and address_parts[2].isdigit()
+    ):
+        dir_token = address_parts[1].upper().rstrip('.')
+        street_num = address_parts[2]
+        parts['housenumber'] = housenumber
+        parts['street'] = f"{dir_token} {street_num}"
+        # Everything after index 2 is city (joined)
+        city_tokens = address_parts[3:]
+        if city_tokens:
+            parts['city'] = ' '.join(city_tokens)
+        return parts
     
     # Determine city (usually the last capitalized word before state)
     # City is typically a proper noun, so look for capitalized words
@@ -476,11 +494,11 @@ def infer_cuisine_from_name(name: str) -> List[str]:
     
     # Mapping of keywords to cuisine values
     cuisine_keywords = {
-        'coffee': 'coffee',
-        'cafe': 'coffee',
-        'café': 'coffee',
-        'espresso': 'coffee',
-        'latte': 'coffee',
+        'coffee': 'coffee_shop',
+        'cafe': 'coffee_shop',
+        'café': 'coffee_shop',
+        'espresso': 'coffee_shop',
+        'latte': 'coffee_shop',
         'burger': 'burger',
         'burgers': 'burger',
         'bubble tea': 'bubble_tea',
@@ -546,6 +564,23 @@ def infer_hairdresser_type_from_name(name: str) -> List[str]:
     return tags
 
 
+def normalize_name(name: str) -> str:
+    """
+    Normalize business name for OSM tags.
+    - If the name is ALL CAPS, convert to Title Case (first letter of each word).
+    - Otherwise, leave it as-is to preserve intentional branding/casing.
+    """
+    if not name:
+        return name
+
+    # Detect all-caps (ignoring spaces and basic punctuation)
+    letters = [ch for ch in name if ch.isalpha()]
+    if letters and all(ch.isupper() for ch in letters):
+        return name.title()
+
+    return name
+
+
 def convert_btcmap_to_osm(data: Dict) -> str:
     """
     Convert BTCMap data to OSM tag format.
@@ -597,10 +632,11 @@ def convert_btcmap_to_osm(data: Dict) -> str:
     
     # Add name
     if 'name' in data:
-        output_lines.append(f"name={data['name']}")
+        normalized_name = normalize_name(data['name'])
+        output_lines.append(f"name={normalized_name}")
         
         # Infer cuisine from name
-        cuisine_tags = infer_cuisine_from_name(data['name'])
+        cuisine_tags = infer_cuisine_from_name(normalized_name)
         output_lines.extend(cuisine_tags)
     
     # Add opening hours if available
